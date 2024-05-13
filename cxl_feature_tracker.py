@@ -24,7 +24,7 @@ def get_tags(token):
 
 def get_commits(from_tag, to_tag, token):
     """
-    Fetches commits related to CXL from specified directories between two tags.
+    Fetches commits related to CXL from specified directories between two tags and includes URL links to each commit.
     """
     commits = []
     for path in ["drivers/cxl", "drivers/dax"]:
@@ -40,8 +40,10 @@ def get_commits(from_tag, to_tag, token):
                     else:
                         url = None
                     for commit in page_commits:
-                        if 'commit' in commit and 'message' in commit['commit'] and ('CXL' in commit['commit']['message'].upper()):
-                            commits.append(commit['commit']['message'].split('\n')[0])  # Extract only the title
+                        if 'commit' in commit:
+                            commit_message = commit['commit']['message'].split('\n')[0]  # Extract only the title
+                            commit_url = commit['html_url']  # URL to the commit on GitHub
+                            commits.append((commit_message, commit_url))
                 else:
                     print(f"Failed to fetch commits: {response.status_code} {response.reason}")
                     break
@@ -52,16 +54,20 @@ def get_commits(from_tag, to_tag, token):
 
 def write_output(commits, output, format):
     """
-    Writes commits to a file or prints to the terminal based on the user's choice of format.
+    Writes commits to a file or prints to the terminal based on the user's choice of format, includes markdown link format.
     """
     try:
-        if format == 'txt' or format == 'md':
+        if format == 'txt':
             with open(output, 'w') as file:
                 for commit in commits:
-                    file.write(commit + '\n')
+                    file.write(commit[0] + '\n')  # Write only the commit message
+        elif format == 'md':
+            with open(output, 'w') as file:
+                for commit_message, commit_url in commits:
+                    file.write(f"- [{commit_message}]({commit_url})\n")  # Format as markdown link
         elif format == 'json':
             with open(output, 'w') as file:
-                json.dump(commits, file, indent=4)
+                json.dump(commits, file, indent=4)  # Dump the entire list as JSON
     except IOError as e:
         print(f"Error writing to file {output}: {e}")
 
@@ -86,14 +92,25 @@ def main(args):
     
     if commits:
         if args.output:
+            # If output file is specified, write to file according to the format
             write_output(commits, args.output, args.format)
         else:
+            # No output file specified
             print(f"\nCXL related changes from Kernel {from_version} to {to_version}:")
-            if args.verbose:
-                for commit in commits:
-                    print(commit)
+            if args.format == 'md':
+                # Output Markdown to STDOUT if format is 'md'
+                for commit_message, commit_url in commits:
+                    print(f"- [{commit_message}]({commit_url})")
+            elif args.format == 'json':
+                # Output JSON to STDOUT if format is 'json'
+                print(json.dumps(commits, indent=4))
+            elif args.verbose:
+                # If verbose is specified, output detailed text to STDOUT
+                for commit_message, commit_url in commits:
+                    print(f"- {commit_message} ({commit_url})")
             else:
-                print("- " + "\n- ".join(commit.split('\n')[0] for commit in commits))
+                # Default behavior, output only commit messages to STDOUT
+                print("- " + "\n- ".join(commit_message for commit_message, commit_url in commits))
     else:
         print("No CXL related changes found.")
 
