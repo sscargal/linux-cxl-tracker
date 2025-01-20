@@ -9,18 +9,26 @@ def get_tags(token):
     """
     url = "https://api.github.com/repos/torvalds/linux/tags"
     headers = {'Authorization': f'token {token}'} if token else {}
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            tags = [tag['name'] for tag in response.json()]
-            stable_tags = sorted([tag for tag in tags if "-rc" not in tag], key=lambda x: x.strip('v'))
-            return stable_tags
-        else:
-            print(f"Failed to fetch tags: {response.status_code} {response.reason}")
+    tags = []
+    
+    while url:
+        try:
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                tags.extend([tag['name'] for tag in response.json()])
+                if 'next' in response.links:
+                    url = response.links['next']['url']
+                else:
+                    url = None
+            else:
+                print(f"Failed to fetch tags: {response.status_code} {response.reason}")
+                return []
+        except requests.RequestException as e:
+            print(f"Error fetching tags from GitHub: {e}")
             return []
-    except requests.RequestException as e:
-        print(f"Error fetching tags from GitHub: {e}")
-        return []
+
+    stable_tags = sorted([tag for tag in tags if "-rc" not in tag], key=lambda x: x.strip('v'))
+    return stable_tags
 
 def get_commits(from_tag, to_tag, token):
     """
@@ -75,14 +83,13 @@ def main(args):
     """
     Main function to process the command-line arguments and initiate fetching and output of CXL changes.
     """
-    token = args.ghtoken
-    from_version = args.start_version
-    to_version = args.end_version
-    tags = get_tags(token)
+    token = args.ghtoken                    # GitHub API token
+    from_version = args.start_version       # Starting kernel version
+    to_version = args.end_version           # Ending kernel version
+    tags = get_tags(token)                  # List of tags from the Linux kernel repository
 
     # If the user only wants to list tags, print them and exit
     if args.list_tags:
-        tags = get_tags(args.ghtoken)
         if tags:
             if args.format == 'json':
                 print(json.dumps(tags, indent=4))
