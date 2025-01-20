@@ -45,7 +45,7 @@ def get_commits(from_tag, to_tag, token):
                             commit_url = commit['html_url']  # URL to the commit on GitHub
                             commits.append((commit_message, commit_url))
                 else:
-                    print(f"Failed to fetch commits: {response.status_code} {response.reason}")
+                    print(f"Failed to fetch commits: {response.status_code} {response.reason} (URL: {url})")
                     break
             except requests.RequestException as e:
                 print(f"Error fetching commits from GitHub: {e}")
@@ -80,16 +80,52 @@ def main(args):
     to_version = args.end_version
     tags = get_tags(token)
 
+    # If the user only wants to list tags, print them and exit
+    if args.list_tags:
+        tags = get_tags(args.ghtoken)
+        if tags:
+            if args.format == 'json':
+                print(json.dumps(tags, indent=4))
+            else:
+                print("\n".join(tags))
+        else:
+            print("No tags found.")
+        exit(0)
+
+    # If no tags are available, exit the program
     if not tags:
         print("No tags available, exiting.")
         return
+    
+    # Validate the specified versions match the tags from the GitHub project
+    def validate_version(version, tags):
+        # Ensure the version starts with 'v' and exists in the list of tags
+        if not version.startswith('v'):
+            version = 'v' + version
+        if version not in tags:
+            raise ValueError(f"Invalid version '{version}'.")
+        return version
 
+    # Validate the specified versions and set defaults if not provided
+    try:
+        if from_version:
+            from_version = validate_version(from_version, tags)
+        if to_version:
+            to_version = validate_version(to_version, tags)
+    except ValueError as e:
+        print(f"Error: {e}. Please ensure the specified versions exist in the repository tags.")
+        return
+
+
+    # If no versions are specified, default to the last two tags (latest and latest-1)
     if not from_version or not to_version:
         from_version = tags[-2]
         to_version = tags[-1]
 
+    # Fetch commits related to CXL between the specified versions
     commits = get_commits(from_version, to_version, token)
     
+    # Output the commits based on the user's choice of format
     if commits:
         if args.output:
             # If output file is specified, write to file according to the format
@@ -115,6 +151,7 @@ def main(args):
         print("No CXL related changes found.")
 
 if __name__ == "__main__":
+    # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Track CXL feature changes in the Linux kernel.")
     parser.add_argument('--ghtoken', type=str, help='GitHub API token for authenticated requests')
     parser.add_argument('--start-version', type=str, help='Starting kernel version')
@@ -122,6 +159,9 @@ if __name__ == "__main__":
     parser.add_argument('--output', type=str, help='Output file name (optional)')
     parser.add_argument('--format', choices=['txt', 'md', 'json'], default='default', help='Output format: txt, md, json, or default (terminal)')
     parser.add_argument('--verbose', action='store_true', help='Display detailed commit messages instead of just titles')
+    parser.add_argument('--list-tags', action='store_true', help='List all tags from the repository')
     args = parser.parse_args()
+
+    #  Call the main function with the parsed arguments
     main(args)
 
