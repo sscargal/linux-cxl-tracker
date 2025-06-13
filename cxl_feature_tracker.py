@@ -159,6 +159,7 @@ def main(args):
             print("No CXL related changes found.")
     except KeyboardInterrupt:
         print("Process interrupted by user.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     # Parse command-line arguments
