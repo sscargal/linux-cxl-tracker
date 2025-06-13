@@ -83,79 +83,83 @@ def main(args):
     """
     Main function to process the command-line arguments and initiate fetching and output of CXL changes.
     """
-    token = args.ghtoken                    # GitHub API token
-    from_version = args.start_version       # Starting kernel version
-    to_version = args.end_version           # Ending kernel version
-    tags = get_tags(token)                  # List of tags from the Linux kernel repository
-
-    # If the user only wants to list tags, print them and exit
-    if args.list_tags:
-        if tags:
-            if args.format == 'json':
-                print(json.dumps(tags, indent=4))
-            else:
-                print("\n".join(tags))
-        else:
-            print("No tags found.")
-        exit(0)
-
-    # If no tags are available, exit the program
-    if not tags:
-        print("No tags available, exiting.")
-        return
-    
-    # Validate the specified versions match the tags from the GitHub project
-    def validate_version(version, tags):
-        # Ensure the version starts with 'v' and exists in the list of tags
-        if not version.startswith('v'):
-            version = 'v' + version
-        if version not in tags:
-            raise ValueError(f"Invalid version '{version}'.")
-        return version
-
-    # Validate the specified versions and set defaults if not provided
     try:
-        if from_version:
-            from_version = validate_version(from_version, tags)
-        if to_version:
-            to_version = validate_version(to_version, tags)
-    except ValueError as e:
-        print(f"Error: {e}. Please ensure the specified versions exist in the repository tags.")
-        return
+        token = args.ghtoken                    # GitHub API token
+        from_version = args.start_version       # Starting kernel version
+        to_version = args.end_version           # Ending kernel version
+        tags = get_tags(token)                  # List of tags from the Linux kernel repository
 
-
-    # If no versions are specified, default to the last two tags (latest and latest-1)
-    if not from_version or not to_version:
-        from_version = tags[-2]
-        to_version = tags[-1]
-
-    # Fetch commits related to CXL between the specified versions
-    commits = get_commits(from_version, to_version, token)
-    
-    # Output the commits based on the user's choice of format
-    if commits:
-        if args.output:
-            # If output file is specified, write to file according to the format
-            write_output(commits, args.output, args.format)
-        else:
-            # No output file specified
-            print(f"\nCXL related changes from Kernel {from_version} to {to_version}:")
-            if args.format == 'md':
-                # Output Markdown to STDOUT if format is 'md'
-                for commit_message, commit_url in commits:
-                    print(f"- [{commit_message}]({commit_url})")
-            elif args.format == 'json':
-                # Output JSON to STDOUT if format is 'json'
-                print(json.dumps(commits, indent=4))
-            elif args.verbose:
-                # If verbose is specified, output detailed text to STDOUT
-                for commit_message, commit_url in commits:
-                    print(f"- {commit_message} ({commit_url})")
+        # If the user only wants to list tags, print them and exit
+        if args.list_tags:
+            if tags:
+                if args.format == 'json':
+                    print(json.dumps(tags, indent=4))
+                else:
+                    print("\n".join(tags))
             else:
-                # Default behavior, output only commit messages to STDOUT
-                print("- " + "\n- ".join(commit_message for commit_message, commit_url in commits))
-    else:
-        print("No CXL related changes found.")
+                print("No tags found.")
+            exit(0)
+
+        # If no tags are available, exit the program
+        if not tags:
+            print("No tags available, exiting.")
+            return
+
+        # Validate the specified versions match the tags from the GitHub project
+        def validate_version(version, tags):
+            # Ensure the version starts with 'v' and exists in the list of tags
+            if not version.startswith('v'):
+                version = 'v' + version
+            if version not in tags:
+                raise ValueError(f"Invalid version '{version}'.")
+            return version
+
+        # Validate the specified versions and set defaults if not provided
+        try:
+            if from_version:
+                from_version = validate_version(from_version, tags)
+            if to_version:
+                to_version = validate_version(to_version, tags)
+        except ValueError as e:
+            print(f"Error: {e}. Please ensure the specified versions exist in the repository tags.")
+            return
+
+
+        # If no versions are specified, default to the last two tags (latest and latest-1)
+        if not from_version or not to_version:
+            from_version = tags[-2]
+            to_version = tags[-1]
+
+        # Fetch commits related to CXL between the specified versions
+        commits = get_commits(from_version, to_version, token)
+
+        # Output the commits based on the user's choice of format
+        if commits:
+            if args.output:
+                # If output file is specified, write to file according to the format
+                write_output(commits, args.output, args.format)
+            else:
+                # No output file specified
+                print(f"\nCXL related changes from Kernel {from_version} to {to_version}:")
+                if args.format == 'md':
+                    # Output Markdown to STDOUT if format is 'md'
+                    for commit_message, commit_url in commits:
+                        print(f"- [{commit_message}]({commit_url})")
+                elif args.format == 'json':
+                    # Output JSON to STDOUT if format is 'json'
+                    print(json.dumps(commits, indent=4))
+                elif args.verbose:
+                    # If verbose is specified, output detailed text to STDOUT
+                    for commit_message, commit_url in commits:
+                        print(f"- {commit_message} ({commit_url})")
+                else:
+                    # Default behavior, output only commit messages to STDOUT
+                    print("- " + "\n- ".join(commit_message for commit_message, commit_url in commits))
+        else:
+            print("No CXL related changes found.")
+    except KeyboardInterrupt:
+        print("Process interrupted by user.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     # Parse command-line arguments
