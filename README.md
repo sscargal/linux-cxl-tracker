@@ -4,6 +4,10 @@
 
 This Python script tracks changes related to Compute Express Link (CXL) in the Linux kernel. It fetches commit messages from the Linux GitHub repository that are pertinent to CXL, specifically focusing on the drivers/cxl and drivers/dax directories. Users can specify the range of kernel versions to check, control the verbosity of the output, and decide on the output format and destination.
 
+## Features
+
+- **Graceful Interruption**: The script can be safely interrupted at any time by pressing Ctrl+C. It will stop processing and exit gracefully.
+
 ## Installation
 
 ### Prerequisites
