@@ -95,6 +95,8 @@ def make_args(**kwargs):
         'list_tags': False,
         'paths': list(tracker.DEFAULT_PATHS),
         'author': 'Steve Scargall',
+        'ai': False,
+        'ai_model': 'claude-sonnet-4-6',
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -450,9 +452,24 @@ class TestWriteHugoOutput:
         tracker.write_hugo_output(self.COMMITS, "/nonexistent/dir/post.md", "v6.13", "v6.14", "Author")
         assert "Error" in capsys.readouterr().err
 
-    def test_version_without_v_in_section_heading(self, tmp_path):
+    def test_version_in_section_heading(self, tmp_path):
         content = self._write(tmp_path)
-        assert "6.14 Kernel" in content
+        assert "Kernel" in content and "v6.14" in content
+
+    def test_with_categories_shows_stats_table(self, tmp_path):
+        out = str(tmp_path / "post.md")
+        categories = tracker.categorize_commits(self.COMMITS)
+        tracker.write_hugo_output(self.COMMITS, out, "v6.13", "v6.14", "Test",
+                                  categories=categories)
+        content = open(out).read()
+        assert "| Category | Commits |" in content
+
+    def test_with_ai_content_included(self, tmp_path):
+        out = str(tmp_path / "post.md")
+        tracker.write_hugo_output(self.COMMITS, out, "v6.13", "v6.14", "Test",
+                                  ai_content="## Key Changes\n- item one\n")
+        content = open(out).read()
+        assert "Key Changes" in content
 
 
 # ---------------------------------------------------------------------------
@@ -652,10 +669,11 @@ class TestMain:
     def test_hugo_format_writes_front_matter(self, tmp_path):
         out = str(tmp_path / "post.md")
         tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
+        tag_date_resp = make_response(TAG_DATE_RESPONSE)    # resolve_tag_date(from_tag)
         commits_resp = make_response(COMMITS_PATH1)
         commits_resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+        to_date_resp = make_response(TAG_DATE_RESPONSE)     # resolve_tag_date(to_tag)
+        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2, to_date_resp]):
             tracker.main(make_args(
                 start_version='v6.13', end_version='v6.14',
                 format='hugo', output=out
@@ -664,15 +682,33 @@ class TestMain:
         assert content.startswith("---\n")
         assert "draft: false" in content
 
+    def test_hugo_date_uses_release_date_not_today(self, tmp_path):
+        """The date: field must be the kernel release date, not today."""
+        out = str(tmp_path / "post.md")
+        tag_resp = make_response(SAMPLE_TAGS_RAW)
+        tag_date_resp = make_response(TAG_DATE_RESPONSE)
+        commits_resp = make_response(COMMITS_PATH1)
+        commits_resp2 = make_response([])
+        to_date_resp = make_response(TAG_DATE_RESPONSE)
+        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2, to_date_resp]):
+            tracker.main(make_args(
+                start_version='v6.13', end_version='v6.14',
+                format='hugo', output=out
+            ))
+        content = open(out).read()
+        # TAG_DATE_RESPONSE returns "2024-01-15T00:00:00Z"; date: line must use that date
+        assert "date: 2024-01-15T00:00:00Z" in content
+
     def test_hugo_default_filename_when_no_output(self, tmp_path, capsys):
         tag_resp = make_response(SAMPLE_TAGS_RAW)
         tag_date_resp = make_response(TAG_DATE_RESPONSE)
         commits_resp = make_response(COMMITS_PATH1)
         commits_resp2 = make_response([])
+        to_date_resp = make_response(TAG_DATE_RESPONSE)
         original_dir = os.getcwd()
         os.chdir(tmp_path)
         try:
-            with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+            with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2, to_date_resp]):
                 tracker.main(make_args(
                     start_version='v6.13', end_version='v6.14',
                     format='hugo', output=None
@@ -687,7 +723,8 @@ class TestMain:
         tag_date_resp = make_response(TAG_DATE_RESPONSE)
         commits_resp = make_response(COMMITS_PATH1)
         commits_resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+        to_date_resp = make_response(TAG_DATE_RESPONSE)
+        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2, to_date_resp]):
             tracker.main(make_args(
                 start_version='v6.13', end_version='v6.14',
                 format='hugo', output=out, author='Jane Doe'
@@ -778,6 +815,453 @@ class TestBuildParser:
     def test_verbose_flag(self):
         args = self.parser.parse_args(['--verbose'])
         assert args.verbose is True
+
+    def test_ai_flag_default_false(self):
+        args = self.parser.parse_args([])
+        assert args.ai is False
+
+    def test_ai_flag_set(self):
+        args = self.parser.parse_args(['--ai'])
+        assert args.ai is True
+
+    def test_ai_model_default(self):
+        args = self.parser.parse_args([])
+        assert args.ai_model == 'claude-sonnet-4-6'
+
+    def test_ai_model_custom(self):
+        args = self.parser.parse_args(['--ai-model', 'claude-opus-4-8'])
+        assert args.ai_model == 'claude-opus-4-8'
+
+    def test_format_choices_include_podcast(self):
+        args = self.parser.parse_args(['--format', 'podcast'])
+        assert args.format == 'podcast'
+
+    def test_format_choices_include_video_short(self):
+        args = self.parser.parse_args(['--format', 'video-short'])
+        assert args.format == 'video-short'
+
+    def test_format_choices_include_explainers(self):
+        args = self.parser.parse_args(['--format', 'explainers'])
+        assert args.format == 'explainers'
+
+
+# ---------------------------------------------------------------------------
+# categorize_commits
+# ---------------------------------------------------------------------------
+
+class TestCategorizeCommits:
+    def test_fix_commit_goes_to_bug_fixes(self):
+        commits = [("cxl: fix memory leak", "http://x")]
+        cats = tracker.categorize_commits(commits)
+        assert ("cxl: fix memory leak", "http://x") in cats["Bug Fixes"]
+
+    def test_add_support_goes_to_features(self):
+        commits = [("cxl: add support for new device", "http://x")]
+        cats = tracker.categorize_commits(commits)
+        assert ("cxl: add support for new device", "http://x") in cats["New Features & Hardware"]
+
+    def test_refactor_goes_to_cleanup(self):
+        commits = [("cxl: refactor region handling", "http://x")]
+        cats = tracker.categorize_commits(commits)
+        assert ("cxl: refactor region handling", "http://x") in cats["Refactoring & Cleanup"]
+
+    def test_test_commit_goes_to_testing(self):
+        commits = [("cxl: add selftests for region", "http://x")]
+        cats = tracker.categorize_commits(commits)
+        assert ("cxl: add selftests for region", "http://x") in cats["Testing"]
+
+    def test_doc_commit_goes_to_documentation(self):
+        commits = [("cxl: update documentation for HDM decoder", "http://x")]
+        cats = tracker.categorize_commits(commits)
+        assert ("cxl: update documentation for HDM decoder", "http://x") in cats["Documentation"]
+
+    def test_perf_commit_goes_to_performance(self):
+        commits = [("cxl: optimiz interrupt path for lower latency", "http://x")]
+        cats = tracker.categorize_commits(commits)
+        assert ("cxl: optimiz interrupt path for lower latency", "http://x") in cats["Performance"]
+
+    def test_unrecognized_goes_to_other(self):
+        commits = [("cxl: miscellaneous tweak", "http://x")]
+        cats = tracker.categorize_commits(commits)
+        assert ("cxl: miscellaneous tweak", "http://x") in cats["Other"]
+
+    def test_all_commits_assigned_exactly_once(self):
+        commits = [
+            ("cxl: fix thing", "http://a"),
+            ("cxl: add support for X", "http://b"),
+            ("cxl: refactor Y", "http://c"),
+            ("cxl: weird commit", "http://d"),
+        ]
+        cats = tracker.categorize_commits(commits)
+        all_assigned = [c for cat_list in cats.values() for c in cat_list]
+        assert len(all_assigned) == len(commits)
+        assert len(set(url for _, url in all_assigned)) == len(commits)
+
+    def test_empty_commits_returns_empty_categories(self):
+        cats = tracker.categorize_commits([])
+        assert all(len(v) == 0 for v in cats.values())
+
+    def test_returns_all_category_keys(self):
+        cats = tracker.categorize_commits([])
+        for cat in tracker.CATEGORY_ORDER:
+            assert cat in cats
+
+    def test_first_match_wins(self):
+        # "add support" matches Features; if also "test" in msg, should still be Features
+        commits = [("cxl: add support for testing environment", "http://x")]
+        cats = tracker.categorize_commits(commits)
+        assert ("cxl: add support for testing environment", "http://x") in cats["New Features & Hardware"]
+        assert ("cxl: add support for testing environment", "http://x") not in cats["Testing"]
+
+
+# ---------------------------------------------------------------------------
+# build_ai_context
+# ---------------------------------------------------------------------------
+
+class TestBuildAiContext:
+    COMMITS = [
+        ("cxl: fix thing", "http://a"),
+        ("cxl: add support for X", "http://b"),
+    ]
+
+    def test_includes_version_info(self):
+        cats = tracker.categorize_commits(self.COMMITS)
+        ctx = tracker.build_ai_context(cats, "v6.13", "v6.14")
+        assert "v6.13" in ctx
+        assert "v6.14" in ctx
+
+    def test_includes_total_count(self):
+        cats = tracker.categorize_commits(self.COMMITS)
+        ctx = tracker.build_ai_context(cats, "v6.13", "v6.14")
+        assert "2" in ctx
+
+    def test_includes_category_names(self):
+        commits = [("cxl: fix bug", "http://a")]
+        cats = tracker.categorize_commits(commits)
+        ctx = tracker.build_ai_context(cats, "v6.13", "v6.14")
+        assert "Bug Fixes" in ctx
+
+    def test_max_per_cat_limits_commits(self):
+        commits = [(f"cxl: fix thing {i}", f"http://{i}") for i in range(30)]
+        cats = tracker.categorize_commits(commits)
+        ctx = tracker.build_ai_context(cats, "v6.13", "v6.14", max_per_cat=5)
+        # Only 5 commits per category should appear (30 bugs, 5 listed)
+        # Count occurrences of "cxl: fix thing" lines
+        lines_with_fix = [l for l in ctx.splitlines() if "cxl: fix thing" in l]
+        assert len(lines_with_fix) <= 5
+
+
+# ---------------------------------------------------------------------------
+# call_ai
+# ---------------------------------------------------------------------------
+
+class TestCallAi:
+    def test_uses_claude_cli_when_available(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "AI response text\n"
+        mock_result.stderr = ""
+        with patch('shutil.which', return_value='/usr/local/bin/claude'):
+            with patch('subprocess.run', return_value=mock_result) as mock_run:
+                result = tracker.call_ai("test prompt")
+        assert result == "AI response text"
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == 'claude'
+        assert '-p' in cmd
+        assert 'test prompt' in cmd
+
+    def test_claude_cli_failure_falls_back_to_sdk(self):
+        fail_result = MagicMock()
+        fail_result.returncode = 1
+        fail_result.stdout = ""
+        fail_result.stderr = "error"
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text="SDK response")]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_msg
+        mock_anthropic = MagicMock()
+        mock_anthropic.Anthropic.return_value = mock_client
+        with patch('shutil.which', return_value='/usr/local/bin/claude'):
+            with patch('subprocess.run', return_value=fail_result):
+                with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test_key'}):
+                    with patch.dict('sys.modules', {'anthropic': mock_anthropic}):
+                        result = tracker.call_ai("test prompt")
+        assert result == "SDK response"
+
+    def test_no_cli_no_api_key_returns_none(self):
+        env = {k: v for k, v in os.environ.items() if k != 'ANTHROPIC_API_KEY'}
+        with patch('shutil.which', return_value=None):
+            with patch.dict(os.environ, env, clear=True):
+                result = tracker.call_ai("test prompt")
+        assert result is None
+
+    def test_claude_cli_timeout_falls_back(self):
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text="SDK fallback")]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_msg
+        mock_anthropic = MagicMock()
+        mock_anthropic.Anthropic.return_value = mock_client
+        import subprocess as subprocess_mod
+        with patch('shutil.which', return_value='/usr/local/bin/claude'):
+            with patch('subprocess.run', side_effect=subprocess_mod.TimeoutExpired('claude', 180)):
+                with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'key'}):
+                    with patch.dict('sys.modules', {'anthropic': mock_anthropic}):
+                        result = tracker.call_ai("test prompt")
+        assert result == "SDK fallback"
+
+    def test_sdk_import_error_returns_none(self, capsys):
+        env = {k: v for k, v in os.environ.items() if k != 'ANTHROPIC_API_KEY'}
+        env['ANTHROPIC_API_KEY'] = 'key'
+        with patch('shutil.which', return_value=None):
+            with patch.dict(os.environ, env, clear=True):
+                # Simulate anthropic not installed by raising ImportError during import
+                import builtins
+                real_import = builtins.__import__
+                def mock_import(name, *args, **kwargs):
+                    if name == 'anthropic':
+                        raise ImportError("No module named 'anthropic'")
+                    return real_import(name, *args, **kwargs)
+                with patch('builtins.__import__', side_effect=mock_import):
+                    result = tracker.call_ai("prompt")
+        assert result is None
+        assert "anthropic" in capsys.readouterr().err.lower()
+
+
+# ---------------------------------------------------------------------------
+# write_podcast_output
+# ---------------------------------------------------------------------------
+
+class TestWritePodcastOutput:
+    COMMITS = [
+        ("cxl: fix thing", "http://a"),
+        ("cxl: add support for X", "http://b"),
+    ]
+
+    def _mock_ai(self, text="[INTRO] Welcome.\n[OUTRO] Goodbye."):
+        return patch.object(tracker, 'call_ai', return_value=text)
+
+    def test_writes_file_with_header(self, tmp_path):
+        out = str(tmp_path / "podcast.md")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with self._mock_ai():
+            tracker.write_podcast_output(self.COMMITS, cats, out, "v6.13", "v6.14",
+                                         "Test Author", "claude-sonnet-4-6")
+        content = open(out).read()
+        assert "Podcast Script" in content
+        assert "v6.14" in content
+
+    def test_ai_content_in_output(self, tmp_path):
+        out = str(tmp_path / "podcast.md")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with self._mock_ai("[INTRO] Hello.\n[OUTRO] Bye."):
+            tracker.write_podcast_output(self.COMMITS, cats, out, "v6.13", "v6.14",
+                                         "Author", "claude-sonnet-4-6")
+        content = open(out).read()
+        assert "[INTRO] Hello." in content
+
+    def test_ai_failure_exits(self, tmp_path):
+        out = str(tmp_path / "podcast.md")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with patch.object(tracker, 'call_ai', return_value=None):
+            with pytest.raises(SystemExit) as exc:
+                tracker.write_podcast_output(self.COMMITS, cats, out, "v6.13", "v6.14",
+                                             "Author", "claude-sonnet-4-6")
+        assert exc.value.code == 1
+
+    def test_author_in_header(self, tmp_path):
+        out = str(tmp_path / "podcast.md")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with self._mock_ai():
+            tracker.write_podcast_output(self.COMMITS, cats, out, "v6.13", "v6.14",
+                                         "Jane Doe", "claude-sonnet-4-6")
+        content = open(out).read()
+        assert "Jane Doe" in content
+
+
+# ---------------------------------------------------------------------------
+# write_video_short_output
+# ---------------------------------------------------------------------------
+
+class TestWriteVideoShortOutput:
+    COMMITS = [
+        ("cxl: fix thing", "http://a"),
+        ("cxl: add support for X", "http://b"),
+    ]
+
+    def _mock_ai(self, text="[Show title] Welcome to Linux v6.14 CXL changes."):
+        return patch.object(tracker, 'call_ai', return_value=text)
+
+    def test_writes_file_with_header(self, tmp_path):
+        out = str(tmp_path / "short.md")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with self._mock_ai():
+            tracker.write_video_short_output(self.COMMITS, cats, out, "v6.13", "v6.14",
+                                             "claude-sonnet-4-6")
+        content = open(out).read()
+        assert "YouTube Short" in content
+        assert "v6.14" in content
+
+    def test_ai_content_in_output(self, tmp_path):
+        out = str(tmp_path / "short.md")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with self._mock_ai("[Show commit] Big fix landed."):
+            tracker.write_video_short_output(self.COMMITS, cats, out, "v6.13", "v6.14",
+                                             "claude-sonnet-4-6")
+        content = open(out).read()
+        assert "[Show commit]" in content
+
+    def test_ai_failure_exits(self, tmp_path):
+        out = str(tmp_path / "short.md")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with patch.object(tracker, 'call_ai', return_value=None):
+            with pytest.raises(SystemExit) as exc:
+                tracker.write_video_short_output(self.COMMITS, cats, out, "v6.13", "v6.14",
+                                                  "claude-sonnet-4-6")
+        assert exc.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# write_explainers_output
+# ---------------------------------------------------------------------------
+
+class TestWriteExplainersOutput:
+    COMMITS = [
+        ("cxl: add support for CXL 3.0 devices", "http://a"),
+        ("cxl: implement dynamic capacity regions", "http://b"),
+    ]
+
+    FEATURES_JSON = json.dumps([
+        {
+            "name": "CXL 3.0 support",
+            "description": "Support for CXL 3.0 spec devices.",
+            "why_interesting": "Enables next-gen memory.",
+            "relevant_commits": ["cxl: add support for CXL 3.0 devices"],
+        }
+    ])
+
+    OUTLINE = "## Suggested Title\nCXL 3.0 Explained\n## Hook\nHere is the hook.\n"
+
+    def test_creates_output_directory(self, tmp_path):
+        out_dir = str(tmp_path / "explainers")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with patch.object(tracker, 'call_ai', side_effect=[self.FEATURES_JSON, self.OUTLINE]):
+            tracker.write_explainers_output(self.COMMITS, cats, out_dir, "v6.13", "v6.14",
+                                            "claude-sonnet-4-6")
+        assert os.path.isdir(out_dir)
+
+    def test_creates_one_file_per_feature(self, tmp_path):
+        out_dir = str(tmp_path / "explainers")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with patch.object(tracker, 'call_ai', side_effect=[self.FEATURES_JSON, self.OUTLINE]):
+            tracker.write_explainers_output(self.COMMITS, cats, out_dir, "v6.13", "v6.14",
+                                            "claude-sonnet-4-6")
+        files = list(os.listdir(out_dir))
+        assert len(files) == 1
+        assert files[0].endswith(".md")
+
+    def test_outline_content_written(self, tmp_path):
+        out_dir = str(tmp_path / "explainers")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with patch.object(tracker, 'call_ai', side_effect=[self.FEATURES_JSON, self.OUTLINE]):
+            tracker.write_explainers_output(self.COMMITS, cats, out_dir, "v6.13", "v6.14",
+                                            "claude-sonnet-4-6")
+        md_file = [f for f in os.listdir(out_dir) if f.endswith(".md")][0]
+        content = open(os.path.join(out_dir, md_file)).read()
+        assert "CXL 3.0 Explained" in content
+
+    def test_invalid_json_exits(self, tmp_path):
+        out_dir = str(tmp_path / "explainers")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with patch.object(tracker, 'call_ai', return_value="not json at all"):
+            with pytest.raises(SystemExit) as exc:
+                tracker.write_explainers_output(self.COMMITS, cats, out_dir, "v6.13", "v6.14",
+                                                "claude-sonnet-4-6")
+        assert exc.value.code == 1
+
+    def test_ai_failure_exits(self, tmp_path):
+        out_dir = str(tmp_path / "explainers")
+        cats = tracker.categorize_commits(self.COMMITS)
+        with patch.object(tracker, 'call_ai', return_value=None):
+            with pytest.raises(SystemExit) as exc:
+                tracker.write_explainers_output(self.COMMITS, cats, out_dir, "v6.13", "v6.14",
+                                                "claude-sonnet-4-6")
+        assert exc.value.code == 1
+
+    def test_json_with_markdown_fence_parsed(self, tmp_path):
+        out_dir = str(tmp_path / "explainers")
+        cats = tracker.categorize_commits(self.COMMITS)
+        fenced = f"```json\n{self.FEATURES_JSON}\n```"
+        with patch.object(tracker, 'call_ai', side_effect=[fenced, self.OUTLINE]):
+            tracker.write_explainers_output(self.COMMITS, cats, out_dir, "v6.13", "v6.14",
+                                            "claude-sonnet-4-6")
+        assert os.path.isdir(out_dir)
+
+
+# ---------------------------------------------------------------------------
+# main() — AI-gated format tests
+# ---------------------------------------------------------------------------
+
+class TestMainAiGating:
+    def _tag_responses(self):
+        return [
+            make_response(SAMPLE_TAGS_RAW),
+            make_response(TAG_DATE_RESPONSE),
+            make_response(COMMITS_PATH1),
+            make_response([]),
+        ]
+
+    def test_podcast_without_ai_flag_exits(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            tracker.main(make_args(
+                start_version='v6.13', end_version='v6.14',
+                format='podcast', ai=False
+            ))
+        assert exc.value.code == 1
+        assert "podcast" in capsys.readouterr().err
+
+    def test_video_short_without_ai_flag_exits(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            tracker.main(make_args(
+                start_version='v6.13', end_version='v6.14',
+                format='video-short', ai=False
+            ))
+        assert exc.value.code == 1
+
+    def test_explainers_without_ai_flag_exits(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            tracker.main(make_args(
+                start_version='v6.13', end_version='v6.14',
+                format='explainers', ai=False
+            ))
+        assert exc.value.code == 1
+
+    def _tag_responses_hugo(self):
+        """Like _tag_responses() but includes the extra resolve_tag_date(to_tag) call hugo needs."""
+        return self._tag_responses() + [make_response(TAG_DATE_RESPONSE)]
+
+    def test_hugo_without_ai_still_works(self, tmp_path):
+        out = str(tmp_path / "post.md")
+        with patch('requests.get', side_effect=self._tag_responses_hugo()):
+            tracker.main(make_args(
+                start_version='v6.13', end_version='v6.14',
+                format='hugo', output=out, ai=False
+            ))
+        content = open(out).read()
+        assert content.startswith("---\n")
+
+    def test_hugo_with_ai_calls_generate_function(self, tmp_path):
+        out = str(tmp_path / "post.md")
+        with patch('requests.get', side_effect=self._tag_responses_hugo()):
+            with patch.object(tracker, '_generate_hugo_ai_content', return_value="AI text") as mock_gen:
+                tracker.main(make_args(
+                    start_version='v6.13', end_version='v6.14',
+                    format='hugo', output=out, ai=True
+                ))
+        mock_gen.assert_called_once()
+        content = open(out).read()
+        assert "AI text" in content
 
 
 # ---------------------------------------------------------------------------

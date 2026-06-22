@@ -13,3 +13,6 @@ dependencies = [
 dev = [
     "pytest>=7.0",
 ]
+ai = [
+    "anthropic>=0.40",
+]

@@ -13,6 +13,7 @@ This project uses [uv](https://docs.astral.sh/uv/) for dependency management. Al
 ```bash
 uv sync                # install all dependencies (runtime + dev) — do this after cloning
 uv sync --no-dev       # production install only (no pytest)
+uv sync --group ai     # also install the optional anthropic SDK for AI fallback
 uv lock --upgrade      # update all packages to latest allowed versions, then run uv sync
 uv add <package>       # add a new runtime dependency
 uv add --dev <package> # add a new development-only dependency
@@ -59,12 +60,15 @@ uv run python3 cxl_feature_tracker.py [OPTIONS]
 | `--ghtoken TOKEN` | string | `$GITHUB_TOKEN` | GitHub personal access token |
 | `--start-version VER` | string | second-latest tag | Starting kernel version (e.g. `v6.13`) |
 | `--end-version VER` | string | latest tag | Ending kernel version (e.g. `v6.14`) |
-| `--output FILE` | string | stdout | Write output to this file |
-| `--format` | `txt\|md\|json\|hugo` | none (plain text) | Output format |
+| `--output FILE` | string | stdout/auto | Write output to this file (or directory for `explainers`) |
+| `--format` | `txt\|md\|json\|hugo\|podcast\|video-short\|explainers` | none | Output format |
+| *(hugo date)* | — | kernel release date | The `date:` field in hugo front matter is set to the `--end-version` tag date, not today |
 | `--verbose` | flag | off | Include commit URLs in terminal output |
 | `--list-tags` | flag | off | Print all stable kernel tags and exit |
 | `--paths PATH…` | string list | `drivers/cxl drivers/dax` | Kernel repo paths to scan |
-| `--author NAME` | string | `Steve Scargall` | Author name for `--format hugo` front matter |
+| `--author NAME` | string | `Steve Scargall` | Author name for hugo/podcast output |
+| `--ai` | flag | off | Use Claude AI for enhanced content generation |
+| `--ai-model MODEL` | string | `claude-sonnet-4-6` | Claude model for SDK fallback path |
 
 `--start-version` and `--end-version` must be provided together or not at all.
 
@@ -79,18 +83,35 @@ uv run python3 cxl_feature_tracker.py
 
 ### Output Formats
 
-| `--format` | `--output` | Result |
-|---|---|---|
-| *(none)* | *(none)* | Commit titles to stdout, one per line |
-| *(none)* | `FILE` | Commit titles to file, one per line |
-| `md` | *(none)* | `- [title](url)` markdown links to stdout |
-| `md` | `FILE` | `- [title](url)` markdown links written to file |
-| `txt` | `FILE` | Commit titles only, written to file |
-| `json` | `FILE` | JSON array of `[title, url]` pairs |
-| `hugo` | *(none)* | Full Hugo `.md` post written to `{to_version}-cxl-changes.md` |
-| `hugo` | `FILE` | Full Hugo `.md` post written to `FILE` |
+| `--format` | `--output` | AI? | Result |
+|---|---|---|---|
+| *(none)* | *(none)* | — | Commit titles to stdout, one per line |
+| *(none)* | `FILE` | — | Commit titles to file, one per line |
+| `md` | *(none)* | — | `- [title](url)` markdown links to stdout |
+| `md` | `FILE` | — | `- [title](url)` markdown links written to file |
+| `txt` | `FILE` | — | Commit titles only, written to file |
+| `json` | `FILE` | — | JSON array of `[title, url]` pairs |
+| `hugo` | *(none)* | optional | Hugo post → `{to_version}-cxl-changes.md`; stats table always, AI intro with `--ai` |
+| `hugo` | `FILE` | optional | Same, written to `FILE` |
+| `podcast` | *(none)* | required | Full episode script → `{to_version}-podcast-script.md` |
+| `podcast` | `FILE` | required | Same, written to `FILE` |
+| `video-short` | *(none)* | required | 60–90 sec YouTube Shorts script → `{to_version}-video-short-script.md` |
+| `video-short` | `FILE` | required | Same, written to `FILE` |
+| `explainers` | *(none)* | required | Per-feature outlines → `{to_version}-explainers/` directory |
+| `explainers` | `DIR` | required | Same, written to `DIR` |
 
 **`--verbose`** adds commit URLs to the default (no `--format`) terminal output.
+
+### AI Content Generation
+
+The `--ai` flag enables Claude AI to generate enhanced prose. Two paths are tried in order:
+
+1. **`claude` CLI** (primary) — invoked as `claude -p "<prompt>"`. Uses the user's Claude subscription. No API key needed. Works if Claude Code or Claude Desktop is installed.
+2. **`ANTHROPIC_API_KEY`** (fallback) — uses the `anthropic` Python SDK. Install with `uv sync --group ai`. The model is set with `--ai-model` (default: `claude-sonnet-4-6`).
+
+If neither is available, `--format hugo` falls back to heuristic-only output. `podcast`, `video-short`, and `explainers` exit with an error if AI is unavailable.
+
+The script sends at most 20 commits per category to the AI to keep prompts under ~8,000 tokens.
 
 ### Common Examples
 
@@ -104,12 +125,24 @@ uv run python3 cxl_feature_tracker.py
 # Specific range, markdown to stdout (preview before blog post)
 uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format md
 
-# Generate a complete Hugo blog post in one step
+# Generate a complete Hugo blog post in one step (heuristic summary, no AI)
 uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format hugo
 
-# Hugo post with a custom output path and author
+# Hugo post with AI-generated intro and key changes section
 uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
-  --format hugo --output index.md --author "Steve Scargall"
+  --format hugo --ai --output index.md
+
+# Generate a full podcast episode script
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
+  --format podcast --ai
+
+# Generate a YouTube Shorts script
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
+  --format video-short --ai
+
+# Generate per-feature explainer video outlines
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
+  --format explainers --ai
 
 # Scan additional kernel paths beyond the defaults
 uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
@@ -151,6 +184,8 @@ uv run python3 cxl_feature_tracker.py \
 ```
 
 Then copy `index.md` into the correct blog post directory and add `featured_image.webp`.
+
+**Date field:** The `date:` field in the Hugo front matter is automatically set to the actual release date of `--end-version` (resolved from the GitHub tag), not today's date. This ensures blog posts are ordered correctly on the site even when written retrospectively.
 
 ### Manual path: `--format md` + template
 
