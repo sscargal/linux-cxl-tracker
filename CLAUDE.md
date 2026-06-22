@@ -6,13 +6,32 @@
 
 Blog posts are published at https://stevescargall.com and the blog source lives at https://github.com/sscargal/stevescargall.com.v2.
 
+## Package Management (uv)
+
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management. All install, run, and test commands go through uv.
+
+```bash
+uv sync                # install all dependencies (runtime + dev) — do this after cloning
+uv sync --no-dev       # production install only (no pytest)
+uv lock --upgrade      # update all packages to latest allowed versions, then run uv sync
+uv add <package>       # add a new runtime dependency
+uv add --dev <package> # add a new development-only dependency
+uv run <command>       # run any command inside the managed virtual environment
+```
+
+Dependencies are declared in `pyproject.toml`. The `uv.lock` lockfile is committed to the repo and ensures reproducible installs across machines.
+
+To regenerate a `requirements.txt` for tools that need one:
+```bash
+uv export --format requirements-txt --no-dev -o requirements.txt
+```
+
 ## Running the Script
 
 ### Prerequisites
 
 ```bash
-pip install -r requirements.txt        # production: requests only
-pip install -r requirements-dev.txt    # development: adds pytest
+uv sync          # installs requests + pytest into .venv automatically
 ```
 
 A GitHub personal access token is strongly recommended. Without one, the GitHub API rate limit is 60 requests/hour (unauthenticated) vs. 5,000/hour (authenticated). The script fetches the tag date for `--start-version` plus paginated commits for each tracked path — a full release can easily exceed 60 API calls.
@@ -30,7 +49,7 @@ The token is resolved in this priority order:
 ### Basic Usage
 
 ```bash
-python3 cxl_feature_tracker.py [OPTIONS]
+uv run python3 cxl_feature_tracker.py [OPTIONS]
 ```
 
 ### All Options
@@ -55,7 +74,7 @@ The script fetches all stable tags (excludes `-rc` tags) and defaults to the **t
 
 ```bash
 # Uses latest two stable tags automatically
-python3 cxl_feature_tracker.py
+uv run python3 cxl_feature_tracker.py
 ```
 
 ### Output Formats
@@ -77,28 +96,28 @@ python3 cxl_feature_tracker.py
 
 ```bash
 # List all stable kernel tags
-python3 cxl_feature_tracker.py --list-tags
+uv run python3 cxl_feature_tracker.py --list-tags
 
 # Default: latest two stable releases, titles only to stdout
-python3 cxl_feature_tracker.py
+uv run python3 cxl_feature_tracker.py
 
 # Specific range, markdown to stdout (preview before blog post)
-python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format md
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format md
 
 # Generate a complete Hugo blog post in one step
-python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format hugo
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format hugo
 
 # Hugo post with a custom output path and author
-python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
   --format hugo --output index.md --author "Steve Scargall"
 
 # Scan additional kernel paths beyond the defaults
-python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
   --paths drivers/cxl drivers/dax include/linux/cxl Documentation/driver-api/cxl \
   --format md
 
 # JSON output for further processing
-python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
   --format json --output changes.json
 ```
 
@@ -126,7 +145,7 @@ content/english/blog/<YEAR>/<MONTH>/linux-kernel-<VERSION>-cxl-changes/index.md
 
 ```bash
 # Generates index.md with front matter + commit list in one command
-python3 cxl_feature_tracker.py \
+uv run python3 cxl_feature_tracker.py \
   --start-version v6.13 --end-version v6.14 \
   --format hugo --output index.md
 ```
@@ -137,7 +156,7 @@ Then copy `index.md` into the correct blog post directory and add `featured_imag
 
 1. Run the tracker:
    ```bash
-   python3 cxl_feature_tracker.py \
+   uv run python3 cxl_feature_tracker.py \
      --start-version v<PREV> --end-version v<VERSION> \
      --format md --output changes.md
    ```
@@ -172,7 +191,7 @@ Then copy `index.md` into the correct blog post directory and add `featured_imag
 ## Running Tests
 
 ```bash
-python3 -m pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 Tests are in `tests/test_cxl_feature_tracker.py` and are fully offline — no GitHub token or network access required. All HTTP calls are mocked.

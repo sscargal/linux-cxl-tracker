@@ -1,0 +1,15 @@
+[project]
+name = "linux-cxl-tracker"
+version = "1.0.0"
+description = "Track CXL feature changes in the Linux kernel"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+dependencies = [
+    "requests>=2.25.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+]
