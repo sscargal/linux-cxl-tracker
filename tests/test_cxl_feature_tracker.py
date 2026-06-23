@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time as time_module
+import requests
 
 import pytest
 from unittest.mock import MagicMock, patch, call
@@ -239,30 +240,56 @@ class TestGetCommits:
     def _tag_date_resp(self):
         return make_response(TAG_DATE_RESPONSE)
 
+    def _sha_set_resp(self, commits=None):
+        """Mock response for _fetch_sha_set (from_tag commit list used to build exclusion set)."""
+        return make_response(commits or [])
+
+    # New call sequence per get_commits("v6.13", "v6.14", token, [path]):
+    #   [0] resolve_tag_date(to_tag)       → TAG_DATE_RESPONSE
+    #   [1] resolve_tag_date(from_tag)     → TAG_DATE_RESPONSE
+    #   [2] _fetch_sha_set(from_tag, path) → list of prior commits (SHA exclusion set)
+    #   [3] commits(sha=to_tag, path, ...) → list of new commits
+
     def test_deduplicates_across_paths(self):
-        """BUG-6: sha aaa111 appears in both paths; should appear only once."""
-        responses = [self._tag_date_resp(), make_response(COMMITS_PATH1), make_response(COMMITS_PATH2)]
+        """SHA aaa111 appears in both paths; should appear only once in output."""
+        responses = [
+            self._tag_date_resp(),          # resolve_tag_date(to_tag)
+            self._tag_date_resp(),          # resolve_tag_date(from_tag)
+            self._sha_set_resp(),           # sha_set for drivers/cxl (empty = all commits are new)
+            make_response(COMMITS_PATH1),   # commits for drivers/cxl from v6.14
+            self._sha_set_resp(),           # sha_set for drivers/dax
+            make_response(COMMITS_PATH2),   # commits for drivers/dax from v6.14
+        ]
         with patch('requests.get', side_effect=responses):
             commits = tracker.get_commits("v6.13", "v6.14", "token", ["drivers/cxl", "drivers/dax"])
         shas = [url.split('/')[-1] for _, url in commits]
         assert len(shas) == len(set(shas)), "Duplicate commit URLs found"
         assert len(commits) == 3  # aaa111, bbb222, ccc333
 
-    def test_since_param_in_commits_url(self):
-        """BUG-1: commits URL must include since= derived from from_tag's date."""
-        tag_resp = self._tag_date_resp()
-        commits_resp = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, commits_resp]) as mock_get:
+    def test_until_param_in_commits_url(self):
+        """Commits URL must use until= (from to_tag date) and must NOT use since=."""
+        responses = [
+            self._tag_date_resp(),  # resolve_tag_date(to_tag)
+            self._tag_date_resp(),  # resolve_tag_date(from_tag)
+            self._sha_set_resp(),   # _fetch_sha_set
+            make_response([]),      # commits for v6.14
+        ]
+        with patch('requests.get', side_effect=responses) as mock_get:
             tracker.get_commits("v6.13", "v6.14", "token", ["drivers/cxl"])
-        commits_url = mock_get.call_args_list[1][0][0]
-        assert "since=2024-01-15T00:00:00Z" in commits_url
+        commits_url = mock_get.call_args_list[3][0][0]
+        assert "until=2024-01-15T00:00:00Z" in commits_url
+        assert "since=" not in commits_url
 
     def test_to_tag_in_commits_url(self):
-        tag_resp = self._tag_date_resp()
-        commits_resp = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, commits_resp]) as mock_get:
+        responses = [
+            self._tag_date_resp(),  # resolve_tag_date(to_tag)
+            self._tag_date_resp(),  # resolve_tag_date(from_tag)
+            self._sha_set_resp(),   # _fetch_sha_set (sha=v6.13)
+            make_response([]),      # commits (sha=v6.14)
+        ]
+        with patch('requests.get', side_effect=responses) as mock_get:
             tracker.get_commits("v6.13", "v6.14", "token", ["drivers/cxl"])
-        commits_url = mock_get.call_args_list[1][0][0]
+        commits_url = mock_get.call_args_list[3][0][0]
         assert "sha=v6.14" in commits_url
 
     def test_extracts_first_line_only(self):
@@ -272,7 +299,12 @@ class TestGetCommits:
             "commit": {"message": "cxl: fix bug\n\nThis is the body paragraph."},
             "html_url": "https://github.com/t/l/commit/abc",
         }]
-        responses = [self._tag_date_resp(), make_response(commit_data)]
+        responses = [
+            self._tag_date_resp(),
+            self._tag_date_resp(),
+            self._sha_set_resp(),
+            make_response(commit_data),
+        ]
         with patch('requests.get', side_effect=responses):
             commits = tracker.get_commits("v6.13", "v6.14", "token", ["drivers/cxl"])
         assert commits[0][0] == "cxl: fix bug"
@@ -283,18 +315,30 @@ class TestGetCommits:
             links={"next": {"url": "https://api.github.com/page2"}}
         )
         page2 = make_response(COMMITS_PATH1[1:])
-        responses = [self._tag_date_resp(), page1, page2]
+        responses = [
+            self._tag_date_resp(),  # to_tag date
+            self._tag_date_resp(),  # from_tag date
+            self._sha_set_resp(),   # sha_set (empty)
+            page1,                  # commits page 1
+            page2,                  # commits page 2
+        ]
         with patch('requests.get', side_effect=responses):
             commits = tracker.get_commits("v6.13", "v6.14", "token", ["drivers/cxl"])
         assert len(commits) == 2
 
     def test_http_error_returns_partial_results(self):
-        responses = [self._tag_date_resp(), make_response([], status=500)]
+        responses = [
+            self._tag_date_resp(),
+            self._tag_date_resp(),
+            self._sha_set_resp(),
+            make_response([], status=500),
+        ]
         with patch('requests.get', side_effect=responses):
             commits = tracker.get_commits("v6.13", "v6.14", "token", ["drivers/cxl"])
         assert commits == []
 
     def test_rate_limit_exits(self):
+        # Rate limit can hit any call; verify we exit cleanly regardless.
         responses = [self._tag_date_resp(), make_response({}, status=429)]
         with patch('requests.get', side_effect=responses):
             with pytest.raises(SystemExit) as exc:
@@ -302,39 +346,77 @@ class TestGetCommits:
         assert exc.value.code == 1
 
     def test_network_error_returns_empty(self):
-        tag_resp = self._tag_date_resp()
-        with patch('requests.get', side_effect=[tag_resp, requests.RequestException("err")]):
+        responses = [
+            self._tag_date_resp(),
+            self._tag_date_resp(),
+            self._sha_set_resp(),
+            requests.RequestException("err"),  # network error on commits fetch
+        ]
+        with patch('requests.get', side_effect=responses):
             commits = tracker.get_commits("v6.13", "v6.14", "token", ["drivers/cxl"])
         assert commits == []
 
     def test_custom_paths_used_in_url(self):
-        tag_resp = self._tag_date_resp()
-        commits_resp = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, commits_resp]) as mock_get:
+        responses = [
+            self._tag_date_resp(),
+            self._tag_date_resp(),
+            self._sha_set_resp(),
+            make_response([]),
+        ]
+        with patch('requests.get', side_effect=responses) as mock_get:
             tracker.get_commits("v6.13", "v6.14", "token", ["include/linux/cxl"])
-        commits_url = mock_get.call_args_list[1][0][0]
+        commits_url = mock_get.call_args_list[3][0][0]
         assert "path=include/linux/cxl" in commits_url
 
     def test_default_paths_used_when_none(self):
-        tag_resp = self._tag_date_resp()
-        # Two paths → two commits API calls
-        resp1 = make_response([])
-        resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, resp1, resp2]) as mock_get:
+        # Two paths → 2 tag date calls + 2*(sha_set + commits) = 6 total
+        responses = [
+            self._tag_date_resp(),  # to_tag date
+            self._tag_date_resp(),  # from_tag date
+            self._sha_set_resp(),   # sha_set for drivers/cxl
+            make_response([]),      # commits for drivers/cxl
+            self._sha_set_resp(),   # sha_set for drivers/dax
+            make_response([]),      # commits for drivers/dax
+        ]
+        with patch('requests.get', side_effect=responses) as mock_get:
             tracker.get_commits("v6.13", "v6.14", "token")
-        # Calls: [resolve_tag_date, drivers/cxl, drivers/dax]
-        assert mock_get.call_count == 3
+        assert mock_get.call_count == 6
 
     def test_malformed_commit_entry_skipped(self):
         bad_commits = [
             {"sha": "aaa", "commit": {"message": "ok"}, "html_url": "http://x"},
             {"sha": "bbb"},  # missing commit/html_url
         ]
-        responses = [self._tag_date_resp(), make_response(bad_commits)]
+        responses = [
+            self._tag_date_resp(),
+            self._tag_date_resp(),
+            self._sha_set_resp(),
+            make_response(bad_commits),
+        ]
         with patch('requests.get', side_effect=responses):
             commits = tracker.get_commits("v6.13", "v6.14", "token", ["drivers/cxl"])
         assert len(commits) == 1
         assert commits[0][0] == "ok"
+
+    def test_excludes_commits_already_in_from_tag(self):
+        """Commits whose SHA is in the from_tag exclusion set are not returned."""
+        sha_set_resp = make_response([
+            {"sha": "aaa111", "commit": {"message": "old"}, "html_url": "http://x/aaa111"},
+        ])
+        new_commits = make_response([
+            {"sha": "aaa111", "commit": {"message": "cxl: old"}, "html_url": "http://x/aaa111"},
+            {"sha": "bbb222", "commit": {"message": "cxl: new"}, "html_url": "http://x/bbb222"},
+        ])
+        responses = [
+            self._tag_date_resp(),
+            self._tag_date_resp(),
+            sha_set_resp,
+            new_commits,
+        ]
+        with patch('requests.get', side_effect=responses):
+            commits = tracker.get_commits("v6.13", "v6.14", "token", ["drivers/cxl"])
+        assert len(commits) == 1
+        assert commits[0][0] == "cxl: new"
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +553,63 @@ class TestWriteHugoOutput:
         content = open(out).read()
         assert "Key Changes" in content
 
+    def test_heuristic_seo_fields_non_empty(self, tmp_path):
+        content = self._write(tmp_path)
+        assert 'meta_title: ""' not in content
+        assert 'description: ""' not in content
+
+    def test_explicit_seo_fields_used(self, tmp_path):
+        out = str(tmp_path / "post.md")
+        tracker.write_hugo_output(self.COMMITS, out, "v6.13", "v6.14", "Test",
+                                  meta_title="Custom SEO Title",
+                                  description="Custom SEO description for testing.")
+        content = open(out).read()
+        assert 'meta_title: "Custom SEO Title"' in content
+        assert 'description: "Custom SEO description for testing."' in content
+
+    def test_build_seo_heuristic_lengths(self):
+        cats = {"Bug Fixes": [("cxl: fix a", "u")] * 3, "New Features": [("cxl: add b", "u")] * 5, "Refactoring": [("cxl: refactor c", "u")] * 2}
+        meta_title, description = tracker._build_seo_heuristic("v6.13", "v6.14", cats)
+        assert len(meta_title) <= 60
+        assert 10 < len(description) <= 160
+        assert "v6.14" in meta_title
+        assert "v6.14" in description
+
+    def test_build_seo_heuristic_empty_categories(self):
+        meta_title, description = tracker._build_seo_heuristic("v6.13", "v6.14", {})
+        assert len(meta_title) > 0
+        assert len(description) > 0
+
+
+# ---------------------------------------------------------------------------
+# _download_featured_image
+# ---------------------------------------------------------------------------
+
+class TestDownloadFeaturedImage:
+    def test_downloads_image_on_200(self, tmp_path):
+        fake_img = b"\x89PNG\r\nfake"
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = fake_img
+        with patch('requests.get', return_value=mock_resp):
+            tracker._download_featured_image(str(tmp_path))
+        dest = tmp_path / "featured_image.webp"
+        assert dest.exists()
+        assert dest.read_bytes() == fake_img
+
+    def test_warns_on_non_200(self, tmp_path, capsys):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        with patch('requests.get', return_value=mock_resp):
+            tracker._download_featured_image(str(tmp_path))
+        assert "Warning" in capsys.readouterr().err
+        assert not (tmp_path / "featured_image.webp").exists()
+
+    def test_warns_on_network_error(self, tmp_path, capsys):
+        with patch('requests.get', side_effect=requests.RequestException("timeout")):
+            tracker._download_featured_image(str(tmp_path))
+        assert "Warning" in capsys.readouterr().err
+
 
 # ---------------------------------------------------------------------------
 # main() — integration
@@ -565,13 +704,35 @@ class TestMain:
         assert exc.value.code == 1
         assert "Error" in capsys.readouterr().err
 
+    # Helpers for building mock response sequences.
+    # get_commits now makes 2 resolve_tag_date calls + (sha_set + commits) per path.
+    # hugo additionally calls resolve_tag_date(to_tag) after get_commits for the date field.
+
+    def _responses_2paths(self, cxl_commits=None, dax_commits=None):
+        """7-response sequence for non-hugo formats with 2 default paths."""
+        return [
+            make_response(SAMPLE_TAGS_RAW),       # get_tags()
+            make_response(TAG_DATE_RESPONSE),      # resolve_tag_date(to_tag) inside get_commits
+            make_response(TAG_DATE_RESPONSE),      # resolve_tag_date(from_tag) inside get_commits
+            make_response([]),                     # _fetch_sha_set for drivers/cxl
+            make_response(COMMITS_PATH1 if cxl_commits is None else cxl_commits),
+            make_response([]),                     # _fetch_sha_set for drivers/dax
+            make_response([] if dax_commits is None else dax_commits),
+        ]
+
+    def _responses_hugo_2paths(self, cxl_commits=None, dax_commits=None):
+        """9-response sequence for hugo format with 2 default paths."""
+        img = MagicMock()
+        img.status_code = 200
+        img.content = b""
+        return self._responses_2paths(cxl_commits, dax_commits) + [
+            make_response(TAG_DATE_RESPONSE),      # resolve_tag_date(to_tag) for hugo date field
+            img,                                   # _download_featured_image
+        ]
+
     def test_default_picks_last_two_stable_tags(self, capsys):
         """BUG-5: default must pick v6.13 and v6.14, not v6.14 and v6.9 due to bad sorting."""
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+        with patch('requests.get', side_effect=self._responses_2paths()):
             tracker.main(make_args())
         out = capsys.readouterr().out
         assert "v6.13" in out
@@ -581,11 +742,7 @@ class TestMain:
 
     def test_output_to_file_txt(self, tmp_path):
         out = str(tmp_path / "out.txt")
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+        with patch('requests.get', side_effect=self._responses_2paths()):
             tracker.main(make_args(
                 start_version='v6.13', end_version='v6.14',
                 output=out, format='txt'
@@ -596,11 +753,7 @@ class TestMain:
     def test_output_without_format_writes_plain_text(self, tmp_path):
         """BUG-3/4: --output without --format must produce non-empty file."""
         out = str(tmp_path / "out.txt")
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+        with patch('requests.get', side_effect=self._responses_2paths()):
             tracker.main(make_args(
                 start_version='v6.13', end_version='v6.14',
                 output=out, format=None
@@ -621,42 +774,26 @@ class TestMain:
     # -- stdout output modes --
 
     def test_stdout_default_format(self, capsys):
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+        with patch('requests.get', side_effect=self._responses_2paths()):
             tracker.main(make_args(start_version='v6.13', end_version='v6.14'))
         out = capsys.readouterr().out
         assert "cxl: fix thing" in out
         assert "http" not in out  # no URLs in default non-verbose mode
 
     def test_stdout_verbose_includes_urls(self, capsys):
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+        with patch('requests.get', side_effect=self._responses_2paths()):
             tracker.main(make_args(start_version='v6.13', end_version='v6.14', verbose=True))
         out = capsys.readouterr().out
         assert "https://github.com" in out
 
     def test_stdout_md_format(self, capsys):
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+        with patch('requests.get', side_effect=self._responses_2paths()):
             tracker.main(make_args(start_version='v6.13', end_version='v6.14', format='md'))
         out = capsys.readouterr().out
         assert "- [cxl: fix thing](" in out
 
     def test_stdout_json_format(self, capsys):
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2]):
+        with patch('requests.get', side_effect=self._responses_2paths()):
             tracker.main(make_args(start_version='v6.13', end_version='v6.14', format='json'))
         out = capsys.readouterr().out
         # stdout contains a header line then the JSON array; find the JSON portion
@@ -668,12 +805,7 @@ class TestMain:
 
     def test_hugo_format_writes_front_matter(self, tmp_path):
         out = str(tmp_path / "post.md")
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)    # resolve_tag_date(from_tag)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        to_date_resp = make_response(TAG_DATE_RESPONSE)     # resolve_tag_date(to_tag)
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2, to_date_resp]):
+        with patch('requests.get', side_effect=self._responses_hugo_2paths()):
             tracker.main(make_args(
                 start_version='v6.13', end_version='v6.14',
                 format='hugo', output=out
@@ -685,12 +817,7 @@ class TestMain:
     def test_hugo_date_uses_release_date_not_today(self, tmp_path):
         """The date: field must be the kernel release date, not today."""
         out = str(tmp_path / "post.md")
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        to_date_resp = make_response(TAG_DATE_RESPONSE)
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2, to_date_resp]):
+        with patch('requests.get', side_effect=self._responses_hugo_2paths()):
             tracker.main(make_args(
                 start_version='v6.13', end_version='v6.14',
                 format='hugo', output=out
@@ -700,15 +827,10 @@ class TestMain:
         assert "date: 2024-01-15T00:00:00Z" in content
 
     def test_hugo_default_filename_when_no_output(self, tmp_path, capsys):
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        to_date_resp = make_response(TAG_DATE_RESPONSE)
         original_dir = os.getcwd()
         os.chdir(tmp_path)
         try:
-            with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2, to_date_resp]):
+            with patch('requests.get', side_effect=self._responses_hugo_2paths()):
                 tracker.main(make_args(
                     start_version='v6.13', end_version='v6.14',
                     format='hugo', output=None
@@ -719,12 +841,7 @@ class TestMain:
 
     def test_hugo_custom_author(self, tmp_path):
         out = str(tmp_path / "post.md")
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response(COMMITS_PATH1)
-        commits_resp2 = make_response([])
-        to_date_resp = make_response(TAG_DATE_RESPONSE)
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp, commits_resp2, to_date_resp]):
+        with patch('requests.get', side_effect=self._responses_hugo_2paths()):
             tracker.main(make_args(
                 start_version='v6.13', end_version='v6.14',
                 format='hugo', output=out, author='Jane Doe'
@@ -735,16 +852,21 @@ class TestMain:
     # -- custom paths --
 
     def test_custom_paths_passed_to_get_commits(self):
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        commits_resp = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, commits_resp]) as mock_get:
+        # Single custom path: tags + to_date + from_date + sha_set + commits = 5 responses
+        responses = [
+            make_response(SAMPLE_TAGS_RAW),    # get_tags()
+            make_response(TAG_DATE_RESPONSE),   # resolve_tag_date(to_tag)
+            make_response(TAG_DATE_RESPONSE),   # resolve_tag_date(from_tag)
+            make_response([]),                  # _fetch_sha_set
+            make_response([]),                  # commits for custom path
+        ]
+        with patch('requests.get', side_effect=responses) as mock_get:
             tracker.main(make_args(
                 start_version='v6.13', end_version='v6.14',
                 paths=['include/linux/cxl']
             ))
-        # Third call is the commits API for the custom path
-        commits_url = mock_get.call_args_list[2][0][0]
+        # 5th call (index 4) is the to_tag commits fetch for the custom path
+        commits_url = mock_get.call_args_list[4][0][0]
         assert "path=include/linux/cxl" in commits_url
 
     # -- keyboard interrupt --
@@ -761,11 +883,7 @@ class TestMain:
     # -- no commits found --
 
     def test_no_commits_prints_message(self, capsys):
-        tag_resp = make_response(SAMPLE_TAGS_RAW)
-        tag_date_resp = make_response(TAG_DATE_RESPONSE)
-        empty1 = make_response([])
-        empty2 = make_response([])
-        with patch('requests.get', side_effect=[tag_resp, tag_date_resp, empty1, empty2]):
+        with patch('requests.get', side_effect=self._responses_2paths(cxl_commits=[], dax_commits=[])):
             tracker.main(make_args(start_version='v6.13', end_version='v6.14'))
         assert "No CXL related changes found" in capsys.readouterr().out
 
@@ -1205,11 +1323,16 @@ class TestWriteExplainersOutput:
 
 class TestMainAiGating:
     def _tag_responses(self):
+        # get_tags + resolve_tag_date(to) + resolve_tag_date(from)
+        # + sha_set(cxl) + commits(cxl) + sha_set(dax) + commits(dax)
         return [
-            make_response(SAMPLE_TAGS_RAW),
-            make_response(TAG_DATE_RESPONSE),
-            make_response(COMMITS_PATH1),
-            make_response([]),
+            make_response(SAMPLE_TAGS_RAW),    # get_tags()
+            make_response(TAG_DATE_RESPONSE),   # resolve_tag_date(to_tag) inside get_commits
+            make_response(TAG_DATE_RESPONSE),   # resolve_tag_date(from_tag) inside get_commits
+            make_response([]),                  # _fetch_sha_set for drivers/cxl
+            make_response(COMMITS_PATH1),       # commits for drivers/cxl
+            make_response([]),                  # _fetch_sha_set for drivers/dax
+            make_response([]),                  # commits for drivers/dax
         ]
 
     def test_podcast_without_ai_flag_exits(self, capsys):
@@ -1238,8 +1361,11 @@ class TestMainAiGating:
         assert exc.value.code == 1
 
     def _tag_responses_hugo(self):
-        """Like _tag_responses() but includes the extra resolve_tag_date(to_tag) call hugo needs."""
-        return self._tag_responses() + [make_response(TAG_DATE_RESPONSE)]
+        """Like _tag_responses() but adds the resolve_tag_date and image download calls hugo makes."""
+        img = MagicMock()
+        img.status_code = 200
+        img.content = b""
+        return self._tag_responses() + [make_response(TAG_DATE_RESPONSE), img]
 
     def test_hugo_without_ai_still_works(self, tmp_path):
         out = str(tmp_path / "post.md")

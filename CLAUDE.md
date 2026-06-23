@@ -174,18 +174,71 @@ Blog posts live in the repo at https://github.com/sscargal/stevescargall.com.v2 
 content/english/blog/<YEAR>/<MONTH>/linux-kernel-<VERSION>-cxl-changes/index.md
 ```
 
-### Quickest path: `--format hugo`
+### Full content suite (canonical workflow)
+
+Every new kernel release should produce **all five content types** in the same output directory. Run these five commands in order for each version pair, substituting `PREV` and `VER`:
 
 ```bash
-# Generates index.md with front matter + commit list in one command
+DIR="/tmp/blogs/<YEAR>/<MM>/linux-kernel-v<VER>-cxl-changes"
+mkdir -p "$DIR"
+
+# 1. Hugo blog post (also downloads featured_image.webp automatically)
 uv run python3 cxl_feature_tracker.py \
-  --start-version v6.13 --end-version v6.14 \
-  --format hugo --output index.md
+  --start-version v<PREV> --end-version v<VER> \
+  --format hugo --ai --output "$DIR/index.md"
+
+# 2. Podcast episode script
+uv run python3 cxl_feature_tracker.py \
+  --start-version v<PREV> --end-version v<VER> \
+  --format podcast --ai --output "$DIR/v<VER>-podcast-script.md"
+
+# 3. YouTube overview script (general, ~5 min)
+uv run python3 cxl_feature_tracker.py \
+  --start-version v<PREV> --end-version v<VER> \
+  --format video-short --ai --output "$DIR/v<VER>-video-overview-script.md"
+
+# 4. Per-feature explainer outlines
+uv run python3 cxl_feature_tracker.py \
+  --start-version v<PREV> --end-version v<VER> \
+  --format explainers --ai --output "$DIR/v<VER>-explainers/"
+
+# 5. Focused YouTube Short (AI-judged — only create if a feature warrants it)
+#    Read the explainer outlines, then ask Claude:
+claude -p "You are evaluating CXL kernel features for a YouTube Short. Here are the
+explainer outlines for kernel v<VER>: $(cat $DIR/v<VER>-explainers/*.md)
+Is any single feature important and interesting enough to warrant its own dedicated
+60-90 second YouTube Short aimed at engineers? Reply YES or NO, and if YES, the
+feature name and a complete 60-90 second script."
+#    If Claude says YES, save the script to: $DIR/v<VER>-focused-short-script.md
 ```
 
-Then copy `index.md` into the correct blog post directory and add `featured_image.webp`.
+**YEAR/MM** comes from the kernel release date, which the script resolves automatically from the GitHub tag (same date used for the `date:` front matter field). Resolve it first if needed:
 
-**Date field:** The `date:` field in the Hugo front matter is automatically set to the actual release date of `--end-version` (resolved from the GitHub tag), not today's date. This ensures blog posts are ordered correctly on the site even when written retrospectively.
+```bash
+uv run python3 -c "
+import sys; sys.path.insert(0,'.')
+from cxl_feature_tracker import resolve_tag_date
+print(resolve_tag_date('v<VER>', '').split('T')[0])
+"
+```
+
+The resulting directory layout per version:
+
+```
+<YEAR>/<MM>/linux-kernel-v<VER>-cxl-changes/
+  index.md                        # Hugo blog post
+  featured_image.webp             # downloaded automatically by --format hugo
+  v<VER>-podcast-script.md        # podcast episode
+  v<VER>-video-overview-script.md # YouTube overview
+  v<VER>-explainers/              # per-feature outlines (one .md per feature)
+  v<VER>-focused-short-script.md  # only if AI judges a feature warrants it
+```
+
+**Date field:** The `date:` field in Hugo front matter is automatically set to the actual release date of `--end-version` (from the GitHub tag), not today's date. This ensures blog posts sort correctly on the site even when written retrospectively.
+
+**Featured image:** `--format hugo` automatically downloads `featured_image.webp` from the blog repo into the same directory as `index.md`. No manual step needed.
+
+**SEO fields:** `meta_title` and `description` are AI-generated when `--ai` is used, or populated with keyword-optimised heuristics otherwise. They are never left empty.
 
 ### Manual path: `--format md` + template
 
@@ -220,8 +273,7 @@ Then copy `index.md` into the correct blog post directory and add `featured_imag
    <PASTE CONTENTS OF changes.md HERE>
    ```
 
-3. Add `featured_image.webp` to the directory.
-4. Set `draft: false` when ready to publish.
+3. Set `draft: false` when ready to publish.
 
 ## Running Tests
 
@@ -235,5 +287,5 @@ Tests are in `tests/test_cxl_feature_tracker.py` and are fully offline — no Gi
 
 - **Rate limits**: 60 req/hr unauthenticated, 5,000 req/hr with a token. Always set `$GITHUB_TOKEN`.
 - **Pagination**: The script follows `Link: rel="next"` headers automatically.
-- **Commit range**: The script resolves `--start-version` to its commit date and passes that as the `since` parameter to the GitHub Commits API, so only commits after the start tag are fetched.
+- **Commit range**: The script uses a SHA set-difference approach. It builds the full set of commit SHAs reachable from `--start-version` (`from_shas`), then fetches all commits reachable from `--end-version` and keeps only those whose SHA is absent from `from_shas`. This correctly handles CXL patches that are committed to subsystem trees weeks before a release and therefore carry committer dates earlier than the previous kernel tag — a date-based `since=` filter would silently drop those commits.
 - **Timeout**: All API requests use a 30-second timeout. Rate limit errors (403/429) print a clear message with the reset time and exit.

@@ -14,6 +14,11 @@ REPO = "torvalds/linux"
 BASE_URL = f"https://api.github.com/repos/{REPO}"
 DEFAULT_PATHS = ["drivers/cxl", "drivers/dax"]
 
+FEATURED_IMAGE_URL = (
+    "https://raw.githubusercontent.com/sscargal/stevescargall.com.v2/main"
+    "/content/english/blog/2025/03/linux-kernel-6.14-cxl-changes/featured_image.webp"
+)
+
 # ---------------------------------------------------------------------------
 # Commit categorization
 # ---------------------------------------------------------------------------
@@ -174,6 +179,73 @@ Do not include a stats table — that is generated separately."""
     return call_ai(prompt, model=model, max_tokens=2048)
 
 
+def _build_seo_heuristic(from_version, to_version, categories):
+    """Generate heuristic meta_title and description from version and category data."""
+    total = sum(len(v) for v in categories.values()) if categories else 0
+    meta_title = f"Linux Kernel {to_version} CXL/DAX Changes | What's New"
+    if len(meta_title) > 60:
+        meta_title = f"Linux Kernel {to_version} CXL Changes"
+    top_cats = [k for k, v in sorted(categories.items(), key=lambda x: -len(x[1])) if v][:3] if categories else []
+    if top_cats:
+        cat_str = ", ".join(c.lower() for c in top_cats)
+        desc = (
+            f"All CXL and DAX changes in Linux Kernel {to_version}: {total} commits "
+            f"covering {cat_str}. Complete commit list from {from_version} to {to_version}."
+        )
+    else:
+        desc = (
+            f"Complete list of CXL and DAX subsystem changes in Linux Kernel {to_version}. "
+            f"Covers all commits from {from_version} to {to_version} for the CXL ecosystem."
+        )
+    if len(desc) > 160:
+        desc = desc[:157] + "..."
+    return meta_title, desc
+
+
+def _generate_hugo_seo_ai(from_version, to_version, categories, model):
+    """Ask AI to write SEO-optimized meta_title and description for Hugo front matter."""
+    total = sum(len(v) for v in categories.values()) if categories else 0
+    top_cats = [f"{len(v)} {k}" for k, v in sorted(categories.items(), key=lambda x: -len(x[1])) if v][:4]
+    cats_summary = ", ".join(top_cats) if top_cats else f"{total} commits"
+    prompt = (
+        f"Write SEO-optimized Hugo front matter fields for a technical blog post about "
+        f"Linux Kernel {to_version} CXL and DAX subsystem changes ({from_version} to {to_version}). "
+        f"The post covers: {cats_summary}.\n\n"
+        f"Return EXACTLY these two lines and nothing else:\n"
+        f"META_TITLE: <title, max 60 chars, include version and CXL keyword, optimized for Google/Bing/Perplexity>\n"
+        f"DESCRIPTION: <meta description, 150-160 chars, include CXL, kernel version, key themes, compelling for click-through>"
+    )
+    result = call_ai(prompt, model=model, max_tokens=200)
+    if not result:
+        return None, None
+    meta_title, description = None, None
+    for line in result.splitlines():
+        if line.startswith("META_TITLE:"):
+            meta_title = line[len("META_TITLE:"):].strip().strip('"')
+        elif line.startswith("DESCRIPTION:"):
+            description = line[len("DESCRIPTION:"):].strip().strip('"')
+    return meta_title or None, description or None
+
+
+def _download_featured_image(output_dir):
+    """Download featured_image.webp into output_dir. Warns on failure, never exits."""
+    dest = os.path.join(output_dir, "featured_image.webp")
+    try:
+        response = requests.get(FEATURED_IMAGE_URL, timeout=30)
+        if response.status_code == 200:
+            with open(dest, 'wb') as f:
+                f.write(response.content)
+            print(f"Downloaded featured_image.webp to {dest}", file=sys.stderr)
+        else:
+            print(
+                f"Warning: could not download featured image "
+                f"(HTTP {response.status_code}); add it manually.",
+                file=sys.stderr
+            )
+    except requests.RequestException as e:
+        print(f"Warning: featured image download failed: {e}; add it manually.", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # GitHub API helpers
 # ---------------------------------------------------------------------------
@@ -259,17 +331,48 @@ def resolve_tag_date(tag, token):
         sys.exit(1)
 
 
+def _fetch_sha_set(tag, path, token, until=None):
+    """Return the set of all commit SHAs reachable from tag that touch path."""
+    params = f"sha={tag}&path={path}&per_page=100"
+    if until:
+        params += f"&until={until}"
+    url = f"{BASE_URL}/commits?{params}"
+    shas = set()
+    while url:
+        response = _api_get(url, token)
+        if response is None or response.status_code != 200:
+            break
+        for commit in response.json():
+            sha = commit.get('sha')
+            if sha:
+                shas.add(sha)
+        url = response.links.get('next', {}).get('url')
+    return shas
+
+
 def get_commits(from_tag, to_tag, token, paths=None):
-    """Fetch commits in (from_tag, to_tag] for the given paths, deduplicated by SHA."""
+    """Fetch commits in (from_tag, to_tag] for the given paths, deduplicated by SHA.
+
+    Uses SHA set-difference rather than a date filter because CXL patches are
+    committed to the subsystem tree weeks before the previous kernel release and
+    retain their original committer dates, so a since=from_tag_date filter would
+    silently miss the entire new commit set.
+    """
     if paths is None:
         paths = DEFAULT_PATHS
 
+    to_date = resolve_tag_date(to_tag, token)
     from_date = resolve_tag_date(from_tag, token)
     seen = set()
     commits = []
 
     for path in paths:
-        url = f"{BASE_URL}/commits?sha={to_tag}&path={path}&since={from_date}"
+        # Build the exclusion set: all SHAs already present in from_tag.
+        print(f"  [{path}] resolving base ({from_tag})...", end='\r', file=sys.stderr)
+        from_shas = _fetch_sha_set(from_tag, path, token, until=from_date)
+
+        # Fetch commits reachable from to_tag and exclude those in from_shas.
+        url = f"{BASE_URL}/commits?sha={to_tag}&path={path}&per_page=100&until={to_date}"
         page_num = 0
 
         while url:
@@ -292,7 +395,7 @@ def get_commits(from_tag, to_tag, token, paths=None):
                 for commit in page_commits:
                     try:
                         sha = commit.get('sha')
-                        if sha and sha not in seen:
+                        if sha and sha not in from_shas and sha not in seen:
                             seen.add(sha)
                             message = commit['commit']['message'].split('\n')[0]
                             commit_url = commit['html_url']
@@ -352,21 +455,30 @@ def _build_stats_table(categories):
 
 
 def write_hugo_output(commits, output, from_version, to_version, author,
-                      categories=None, ai_content=None, release_date=None):
+                      categories=None, ai_content=None, release_date=None,
+                      meta_title=None, description=None):
     """Write a complete Hugo blog post with YAML front matter and optional AI content.
 
     release_date: YYYY-MM-DD string of the to_version kernel release date.
     If omitted, falls back to today's date (useful for testing).
+    meta_title/description: SEO front matter fields. Auto-generated from heuristics if omitted.
     """
     date_str = release_date if release_date else datetime.date.today().isoformat()
     version_num = to_version.lstrip('v')
     total = len(commits)
 
+    if meta_title is None or description is None:
+        h_meta_title, h_description = _build_seo_heuristic(from_version, to_version, categories or {})
+        if meta_title is None:
+            meta_title = h_meta_title
+        if description is None:
+            description = h_description
+
     front_matter = (
         f"---\n"
         f"title: \"Linux Kernel {to_version} is Released: This is What's New for Compute Express Link (CXL)\"\n"
-        f"meta_title: \"\"\n"
-        f"description: \"\"\n"
+        f"meta_title: \"{meta_title}\"\n"
+        f"description: \"{description}\"\n"
         f"date: {date_str}T00:00:00Z\n"
         f"image: \"featured_image.webp\"\n"
         f"categories: [\"CXL\"]\n"
@@ -538,17 +650,33 @@ Return a JSON array only (no other text). Each item:
         print("Error: AI content generation failed. Check claude CLI or $ANTHROPIC_API_KEY.", file=sys.stderr)
         sys.exit(1)
 
-    # Parse JSON — strip any markdown fences if present
+    # Parse JSON — strip any markdown fences if present, then extract the JSON array
     features_text = features_json.strip()
     if features_text.startswith("```"):
         features_text = re.sub(r"^```[a-z]*\n?", "", features_text)
-        features_text = re.sub(r"\n?```$", "", features_text)
+        features_text = re.sub(r"\n?```.*$", "", features_text, flags=re.DOTALL)
+
+    # Extract just the JSON array (from first '[' to matching ']'), ignoring trailing text
+    bracket_start = features_text.find("[")
+    if bracket_start != -1:
+        depth = 0
+        bracket_end = -1
+        for idx, ch in enumerate(features_text[bracket_start:], bracket_start):
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    bracket_end = idx
+                    break
+        if bracket_end != -1:
+            features_text = features_text[bracket_start:bracket_end + 1]
 
     try:
         features = json.loads(features_text)
     except json.JSONDecodeError as e:
         print(f"Error: could not parse feature list from AI: {e}", file=sys.stderr)
-        print(f"Raw response:\n{features_json[:500]}", file=sys.stderr)
+        print(f"Raw response:\n{features_json}", file=sys.stderr)
         sys.exit(1)
 
     # Create output directory
@@ -783,6 +911,8 @@ def main(args):
             # not the date the script was run.
             release_date = resolve_tag_date(to_version, token).split('T')[0]
             ai_content = None
+            meta_title = None
+            description = None
             if args.ai:
                 print("Generating AI-enhanced intro and key changes...", file=sys.stderr)
                 ai_content = _generate_hugo_ai_content(
@@ -791,9 +921,18 @@ def main(args):
                 if not ai_content:
                     print("Warning: AI generation failed; proceeding with heuristic summary only.",
                           file=sys.stderr)
+                print("Generating AI-optimized SEO metadata...", file=sys.stderr)
+                meta_title, description = _generate_hugo_seo_ai(
+                    from_version, to_version, categories, args.ai_model
+                )
+                if not meta_title:
+                    print("Warning: AI SEO generation failed; using heuristic values.",
+                          file=sys.stderr)
             write_hugo_output(commits, output, from_version, to_version, args.author,
                               categories=categories, ai_content=ai_content,
-                              release_date=release_date)
+                              release_date=release_date, meta_title=meta_title,
+                              description=description)
+            _download_featured_image(os.path.dirname(os.path.abspath(output)))
             return
 
         # --- podcast ---
