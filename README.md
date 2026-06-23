@@ -2,98 +2,185 @@
 
 ## Description
 
-This Python script tracks changes related to Compute Express Link (CXL) in the Linux kernel. It fetches commit messages from the Linux GitHub repository that are pertinent to CXL, specifically focusing on the drivers/cxl and drivers/dax directories. Users can specify the range of kernel versions to check, control the verbosity of the output, and decide on the output format and destination.
+This Python script tracks changes related to Compute Express Link (CXL) in the Linux kernel. It fetches commit messages from the Linux GitHub repository that are pertinent to CXL, specifically focusing on the `drivers/cxl` and `drivers/dax` directories. Users can specify the range of kernel versions to check, control the verbosity of the output, and decide on the output format and destination.
 
 ## Features
 
 - **Graceful Interruption**: The script can be safely interrupted at any time by pressing Ctrl+C. It will stop processing and exit gracefully.
+- **Hugo Blog Post Generation**: Generate a complete Hugo-formatted Markdown post with front matter in one command.
+- **Configurable Paths**: Scan any kernel subsystem directory, not just the defaults.
+- **Deduplicated Output**: Commits touching multiple tracked paths appear only once.
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.6 or higher
-- Python requests library
-- `venv` or `conda` Python Virtual Environment (Optional)
+- Python 3.8 or higher
+- [uv](https://docs.astral.sh/uv/) — fast Python package and project manager
+
+Install uv (if not already installed):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
 ### Setup
 
-Here's a quick setup guide if you want to run the script locally:
+```bash
+# Clone the repository
+git clone https://github.com/sscargal/linux-cxl-tracker
+cd linux-cxl-tracker
 
-1. Install Python 3.x.
-2. Create a Virtual Environment. It's a good practice to use a virtual environment for Python projects to manage dependencies separately from the global Python environment. You can create a virtual environment using `venv` or `conda`:
+# Install dependencies and create virtual environment
+uv sync
 
-Using `venv`
-```bash
-python -m venv env
-source env/bin/activate  # On Windows use env\Scripts\activate
+# Verify the installation
+uv run python3 cxl_feature_tracker.py --help
 ```
-Using `Conda`
+
+`uv sync` creates a `.venv/` directory and installs all dependencies automatically — no manual `pip install` or virtual environment activation needed.
+
+### Updating packages
+
 ```bash
-conda create --name myenv python=3.8
-conda activate myenv
+uv lock --upgrade   # update all packages to latest allowed versions
+uv sync             # install the updated packages
 ```
-3. Install the required dependencies:
+
+### Adding new dependencies
+
 ```bash
-pip install -r requirements.txt
+uv add <package>          # add a runtime dependency
+uv add --dev <package>    # add a development-only dependency
 ```
+
+### AI content generation (optional)
+
+Install the optional `anthropic` SDK for the `ANTHROPIC_API_KEY` fallback path:
+
+```bash
+uv sync --group ai
+```
+
+The primary AI path uses the `claude` CLI (included with Claude Code/Desktop) and requires no API key.
 
 ### Download
 
-Clone this repository 
+Clone this repository:
 
 ```bash
 git clone https://github.com/sscargal/linux-cxl-tracker
 ```
 
-or download the script directly:
-
-```bash
-git clone https://github.com/sscargal/linux-cxl-tracker/linux-cxl-tracker.git
-```
-
 ## Usage
 
-Command-Line Options
+### Command-Line Options
 
-- `--ghtoken`: Specifies the GitHub API token for authenticated requests (optional but recommended to avoid rate limits).
-- `--start-version`: Specifies the starting kernel version to track changes from.
-- `--end-version`: Specifies the ending kernel version to track changes to.
-- `--output`: Specifies the filename where the output should be written. If not provided, output is printed to the terminal.
-- `--format`: Specifies the format of the output file. Options include txt, md, json. Default is terminal output.
-- `--verbose`: When set, the script will display detailed commit messages. By default, only commit titles are shown.
+| Option | Description |
+|---|---|
+| `--ghtoken TOKEN` | GitHub API token (or set `$GITHUB_TOKEN` / `$GH_TOKEN`) |
+| `--start-version VER` | Starting kernel version (e.g. `v6.13`) |
+| `--end-version VER` | Ending kernel version (e.g. `v6.14`) |
+| `--output FILE` | Write output to this file (or directory for `--format explainers`) |
+| `--format` | Output format: `txt`, `md`, `json`, `hugo`, `podcast`, `video-short`, `explainers` |
+| `--verbose` | Include commit URLs in terminal output |
+| `--list-tags` | List all stable kernel tags and exit |
+| `--paths PATH…` | Kernel repo paths to scan (default: `drivers/cxl drivers/dax`) |
+| `--author NAME` | Author name for Hugo front matter and podcast scripts |
+| `--ai` | Use Claude AI for enhanced content generation |
+| `--ai-model MODEL` | Claude model for AI generation via SDK (default: `claude-sonnet-4-6`) |
+
+#### Output formats
+
+| Format | Description | AI required? |
+|---|---|---|
+| (none) | Plain text commit list to stdout | No |
+| `txt` | Plain text commit list to file | No |
+| `md` | Markdown link list | No |
+| `json` | JSON array of `[message, url]` pairs | No |
+| `hugo` | Complete Hugo blog post with stats table and optional AI intro | No (enhanced with `--ai`) |
+| `podcast` | Full conversational podcast episode script | Yes (`--ai`) |
+| `video-short` | 60–90 second YouTube Shorts script | Yes (`--ai`) |
+| `explainers` | One explainer video outline per key feature (directory output) | Yes (`--ai`) |
+
+`--start-version` and `--end-version` must be provided together or not at all. When omitted, the two most recent stable releases are used automatically.
+
+A GitHub personal access token is strongly recommended — unauthenticated requests are rate-limited to 60/hour. Set `export GITHUB_TOKEN=<your_token>` in your shell profile to avoid passing it on every invocation.
 
 ## Examples
 
-Track Changes with Default Options:
+Track changes with default options (latest two stable releases):
 ```bash
-./cxl_feature_tracker.py --start-version v5.8 --end-version v5.9
+uv run python3 cxl_feature_tracker.py
 ```
 
-Track Changes with Verbose Output:
+List all stable kernel tags:
 ```bash
-./cxl_feature_tracker.py --start-version v5.8 --end-version v5.9 --verbose
+uv run python3 cxl_feature_tracker.py --list-tags
 ```
 
-Track Changes and Write to a Text File:
+Track changes between specific versions, markdown output to stdout:
 ```bash
-./cxl_feature_tracker.py --start-version v5.8 --end-version v5.9 --output changes.txt --format txt
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format md
 ```
 
-Track Changes and Write to a Markdown File with Verbose Output:
+Generate a complete Hugo blog post in one step:
 ```bash
-./cxl_feature_tracker.py --start-version v5.8 --end-version v5.9 --output changes.md --format md --verbose
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format hugo
 ```
 
-Track Changes Using GitHub Token:
-GitHub API has a rate limit, especially for unauthenticated requests (default). For more frequent usage or large data, use authentication by adding a token in the request headers.
+The `date:` field in the Hugo front matter is automatically set to the actual release date of `--end-version`, not today's date. Blog posts can be written retrospectively and will still appear in the correct chronological order on the site.
+
+Hugo blog post with AI-enhanced intro (requires `claude` CLI or `$ANTHROPIC_API_KEY`):
 ```bash
-./cxl_feature_tracker.py --ghtoken YOUR_GITHUB_TOKEN --start-version v5.8 --end-version v5.9
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format hugo --ai
 ```
 
-Track Changes and Write to a JSON File:
+Generate a podcast episode script:
 ```bash
-./cxl_feature_tracker.py --start-version v5.8 --end-version v5.9 --output changes.json --format json
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format podcast --ai
+```
+
+Generate a YouTube Shorts script:
+```bash
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format video-short --ai
+```
+
+Generate per-feature explainer video outlines (creates a directory):
+```bash
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format explainers --ai
+```
+
+Write output to a file:
+```bash
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format md --output changes.md
+```
+
+Verbose output (includes commit URLs):
+```bash
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --verbose
+```
+
+Using a GitHub token:
+```bash
+uv run python3 cxl_feature_tracker.py --ghtoken YOUR_GITHUB_TOKEN --start-version v6.13 --end-version v6.14
+```
+
+JSON output for further processing:
+```bash
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 --format json --output changes.json
+```
+
+Scan additional kernel paths:
+```bash
+uv run python3 cxl_feature_tracker.py --start-version v6.13 --end-version v6.14 \
+  --paths drivers/cxl drivers/dax include/linux/cxl --format md
+```
+
+## Running Tests
+
+```bash
+uv run pytest tests/ -v
 ```
 
 ## Contributing

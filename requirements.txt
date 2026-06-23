@@ -1,2 +1,0 @@
-# Requests library for making HTTP requests
-requests>=2.25.1
